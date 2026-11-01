@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ALT 1 Gantry Simulator</title>
+  <style>
+    #viewport { height: 70vh; min-height: 480px; }
+    #viewport canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <h1>ALT 1 Gantry Simulator</h1>
+  <p>CAD assembly and firmware monitor. Each rack is 250 mm long; CAD tooth engagement gives 197.92 mm travel on A and 202.63 mm on B. Position between endpoints is estimated, not measured.</p>
+
+  <h2>Firmware</h2>
+  <button id="connect">Connect ESP32</button>
+  <span id="connectionState">Not connected</span>
+  <p>Use Chrome or Edge on localhost. Connect at 115200 baud. The simulator requests <code>map</code> and <code>st</code> reports. Close other serial monitors first.</p>
+  <input id="serialCommand" type="text" maxlength="80" placeholder="Firmware command (e.g. mon, st)">
+  <button id="sendCommand" disabled>Send</button>
+  <p>Motion commands require confirmation and operate the real gantry. Keep clear and be ready to stop it.</p>
+  <pre id="serial-log">Firmware output will appear here.</pre>
+  <p id="liveState">Connect to show firmware sensor and motion state.</p>
+
+  <h2>Axis position</h2>
+  <label for="axisA">Axis A position (max 197.92 mm) <span id="axisAValue">100 mm</span></label>
+  <input id="axisA" type="range" min="0" max="197.920337176" value="100" step="any">
+  <label for="axisB">Axis B position (max 202.63 mm) <span id="axisBValue">100 mm</span></label>
+  <input id="axisB" type="range" min="0" max="202.632726157" value="100" step="any">
+  <button id="play">Animate</button>
+  <button id="home">Home</button>
+  <button id="mid">Mid-travel</button>
+
+  <h2>Endpoint inputs</h2>
+  <ul id="sensors"></ul>
+  <p>The CAD omits sensors, brackets, and trigger targets, so their physical locations cannot be confirmed here. The four entries below are endpoint signals only. Mount each sensor to detect its moving target near the corresponding travel limit, before a mechanical stop, then verify its pin and polarity on the actual hardware.</p>
+  <p>Manual preview marks an endpoint active within 4 mm of the modeled travel limit. Live states come from firmware output. Live positions are estimates because the firmware has no encoder feedback.</p>
+  <p>Drag to orbit, scroll to zoom, and right-drag to pan.</p>
+  <div id="viewport"><div id="loading">Loading STL parts...</div></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from "./vendor/three/three.module.js";
+    import { STLLoader } from "./vendor/three/examples/jsm/loaders/STLLoader.js";
+    import { OrbitControls } from "./vendor/three/examples/jsm/controls/OrbitControls.js";
+
+    const MODULE_MM = 1.5;
+    const PITCH = Math.PI * MODULE_MM;
+    const PINION_TEETH = 20;
+    const DEDENDUM_MM = 1.25 * MODULE_MM;
+    const PINION_RADIUS_MM = MODULE_MM * PINION_TEETH / 2;
+    const RACK_LENGTH_MM = 250;
+    const HOME_A = 44;
+    const HOME_B = 45;
+    const END_TOOTH = 2;
+    const TRAVEL_A = (HOME_A - END_TOOTH) * PITCH;
+    const TRAVEL_B = (HOME_B - END_TOOTH) * PITCH;
+    const Z_B = 15.6;
+    const PINION_Y = -(DEDENDUM_MM + PINION_RADIUS_MM);
+    const viewport = document.querySelector("#viewport");
+    const loading = document.querySelector("#loading");
+    const rangeA = document.querySelector("#axisA");
+    const rangeB = document.querySelector("#axisB");
+    const valueA = document.querySelector("#axisAValue");
+    const valueB = document.querySelector("#axisBValue");
+    const sensorPanel = document.querySelector("#sensors");
+    const connectionState = document.querySelector("#connectionState");
+    rangeA.max = String(TRAVEL_A);
+    rangeB.max = String(TRAVEL_B);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#ffffff");
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 2000);
+    camera.up.set(0, 0, 1);
+    camera.position.set(300, -450, 320);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    viewport.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(30, -10, 72);
+    controls.enableDamping = true;
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 2.2));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.3);
+    keyLight.position.set(180, -150, 360);
+    scene.add(keyLight);
+
+    const grid = new THREE.GridHelper(520, 52);
+    grid.position.set(25, 0, -52);
+    scene.add(grid);
+
+    const assemblyFrame = new THREE.Group();
+    assemblyFrame.rotation.x = Math.PI / 2;
+    scene.add(assemblyFrame);
+    const model = new THREE.Group();
+    assemblyFrame.add(model);
+    const rackA = new THREE.Group();
+    const carriageA = new THREE.Group();
+    const carriageB = new THREE.Group();
+    model.add(rackA, carriageA);
+    carriageA.add(carriageB);
+    const sensorNames = ["X_MIN", "X_MAX / special_IR", "Y_MIN", "Y_MAX"];
+    let loadedParts = 0;
+    let animationOn = false;
+    let animationStart = 0;
+    let serialPort = null;
+    let serialReader = null;
+    let serialReadTask = null;
+    let disconnectRequested = false;
+    let liveMode = false;
+    let lastMonitorAt = 0;
+    let lastLiveRenderAt = 0;
+    let serialBuffer = "";
+    let activeLevel = null;
+    let armedState = "unknown";
+    let connectionError = false;
+    const sensorState = { X_MIN: null, X_MAX: null, Y_MIN: null, Y_MAX: null };
+    const liveAxes = {
+      X: { position: null, heading: null, state: "UNKNOWN", fault: "NONE", speed: null, reversals: 0, segment: null, measuredSegmentMs: null },
+      Y: { position: null, heading: null, state: "UNKNOWN", fault: "NONE", speed: null, reversals: 0, segment: null, measuredSegmentMs: null }
+    };
+
+    const material = new THREE.MeshStandardMaterial({
+      color: "#a0a0a0", roughness: 0.78, metalness: 0.04
+    });
+    const loader = new STLLoader();
+    const printToAssembly = {
+      "rack.stl": new THREE.Matrix4().set(
+        1, 0, 0, 0,
+        0, 0, -1, 12,
+        0, 1, 0, 0,
+        0, 0, 0, 1
+      ),
+      "guide.stl": new THREE.Matrix4().set(
+        1, 0, 0, 0,
+        0, 0, -1, 15.3,
+        0, 1, 0, 0,
+        0, 0, 0, 1
+      ),
+      "junction.stl": new THREE.Matrix4().set(
+        1, 0, 0, 0,
+        0, 0, -1, 15.3,
+        0, 1, 0, 0,
+        0, 0, 0, 1
+      ),
+      "tool_holder.stl": new THREE.Matrix4().set(
+        1, 0, 0, 0,
+        0, -1, 0, 0,
+        0, 0, -1, 15.3,
+        0, 0, 0, 1
+      )
+    };
+
+    function addStl(file, material, parent, position = [0, 0, 0]) {
+      loader.load(file, geometry => {
+        geometry.applyMatrix4(printToAssembly[file] || new THREE.Matrix4());
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.set(...position);
+        parent.add(mesh);
+        loadedParts++;
+        if (loadedParts === 7) loading.remove();
+      }, undefined, error => {
+        loading.textContent = `Could not load ${file}; serve this folder over HTTP.`;
+        console.error(`STL load failed: ${file}`, error);
+      });
+    }
+
+    // STL exports are oriented for printing; these meshes are transformed back
+    // to the source-part coordinates before applying assembly() placements.
+    addStl("guide.stl", material, model);
+    addStl("pinion.stl", material, model, [0, PINION_Y, 7]);
+    addStl("rack.stl", material, rackA);
+    addStl("junction.stl", material, carriageA);
+    addStl("pinion.stl", material, carriageA, [0, PINION_Y, 7]);
+    addStl("rack.stl", material, carriageB);
+    addStl("tool_holder.stl", material, carriageB);
+
+    function poseFor(a, b) {
+      const positionA = Math.min(Math.max(a, 0), TRAVEL_A);
+      const positionB = Math.min(Math.max(b, 0), TRAVEL_B);
+      const tailA = -PITCH * (HOME_A - Math.round(positionA / PITCH));
+      const tipA = tailA + RACK_LENGTH_MM;
+      const junctionX = tipA - 1.2;
+      const tailB = -PITCH * (HOME_B - Math.round(positionB / PITCH));
+      return { tailA, junctionX, tailB };
+    }
+
+    function placeAssembly(a, b, liveSensors = null) {
+      const pose = poseFor(a, b);
+      rackA.position.set(pose.tailA, 0, 0);
+      carriageA.position.set(pose.junctionX, 6, Z_B);
+      carriageA.rotation.z = Math.PI / 2;
+      carriageB.position.set(pose.tailB, 0, 0);
+
+      const active = liveSensors
+        ? [liveSensors.X_MIN, liveSensors.X_MAX, liveSensors.Y_MIN, liveSensors.Y_MAX]
+        : [a <= 4, a >= TRAVEL_A - 4, b <= 4, b >= TRAVEL_B - 4];
+      valueA.textContent = liveMode && liveAxes.X.position === null
+        ? "unknown" : liveMode
+          ? `~${Math.round(liveAxes.X.position)} mm` : `${Number(a.toFixed(2))} mm`;
+      valueB.textContent = liveMode && liveAxes.Y.position === null
+        ? "unknown" : liveMode
+          ? `~${Math.round(liveAxes.Y.position)} mm` : `${Number(b.toFixed(2))} mm`;
+      sensorPanel.innerHTML = sensorNames.map((name, i) =>
+        `<li>${name}: ${active[i] === null ? "unknown" : active[i] ? "ACTIVE" : "clear"}</li>`
+      ).join("");
+    }
+
+    function setConnectionState(text, isError = false) {
+      connectionState.textContent = text;
+      connectionError = isError;
+    }
+
+    function refreshLiveView() {
+      if (!liveMode) {
+        placeAssembly(Number(rangeA.value), Number(rangeB.value));
+        document.querySelector("#liveState").textContent =
+          `Preview — Axis A ${rangeA.value} mm | Axis B ${rangeB.value} mm`;
+        return;
+      }
+      const a = liveAxes.X.position ?? Number(rangeA.value);
+      const b = liveAxes.Y.position ?? Number(rangeB.value);
+      if (liveAxes.X.position !== null) rangeA.value = String(Math.round(liveAxes.X.position));
+      if (liveAxes.Y.position !== null) rangeB.value = String(Math.round(liveAxes.Y.position));
+      placeAssembly(a, b, sensorState);
+      const stateText = ["X", "Y"].map(axis => {
+        const item = liveAxes[axis];
+        const heading = item.heading ? ` ${item.heading}` : "";
+        const fault = item.fault !== "NONE" ? ` (${item.fault})` : "";
+        const position = item.position === null ? "position unknown" : `~${Math.round(item.position)} mm`;
+        return `${axis}: ${item.state}${heading}, ${position}${fault}`;
+      });
+      document.querySelector("#liveState").textContent =
+        `${liveMode ? `Live estimates; armed=${armedState} — ` : "Preview — "}${stateText.join(" | ")}`;
+    }
+
+    function parseSensorLine(line) {
+      let found = false;
+      const platformPattern = /\b(X_MIN|X_MAX|Y_MIN|Y_MAX|special_IR)\((\d+)\)=(HIGH|LOW)(\*)?/gi;
+      for (const match of line.matchAll(platformPattern)) {
+        const name = match[1].toUpperCase() === "SPECIAL_IR" ? "X_MAX" : match[1].toUpperCase();
+        sensorState[name] = Boolean(match[4]);
+        found = true;
+      }
+      const arduinoPattern = /\b(X_MIN|X_MAX|Y_MIN|Y_MAX|special_IR)\s+raw=(HIGH|LOW)\s+endpoint=(YES|NO)/gi;
+      for (const match of line.matchAll(arduinoPattern)) {
+        const name = match[1].toUpperCase() === "SPECIAL_IR" ? "X_MAX" : match[1].toUpperCase();
+        sensorState[name] = match[3].toUpperCase() === "YES";
+        found = true;
+      }
+      if (found) {
+        lastMonitorAt = performance.now();
+        const endpoints = { X_MIN: 0, X_MAX: TRAVEL_A, Y_MIN: 0, Y_MAX: TRAVEL_B };
+        for (const [sensor, position] of Object.entries(endpoints)) {
+          if (sensorState[sensor]) {
+            const axis = sensor[0];
+            liveAxes[axis].position = position;
+            const segment = liveAxes[axis].segment;
+            if (!segment || segment.to === position) liveAxes[axis].segment = null;
+          }
+        }
+      }
+      const polarity = line.match(/\bpol=(HIGH|LOW)\b/i);
+      if (polarity) activeLevel = polarity[1].toUpperCase();
+      const arduinoPolarity = line.match(/\[sensors\].*\bactive=(HIGH|LOW)\b/i);
+      if (arduinoPolarity) activeLevel = arduinoPolarity[1].toUpperCase();
+      return found;
+    }
+
+    function beginEstimatedTravel(axisName, from, to, startAt, durationMs) {
+      const axis = liveAxes[axisName];
+      axis.position = from;
+      axis.segment = durationMs > 0 ? { from, to, startAt, durationMs } : null;
+    }
+
+    function processFirmwareLine(line) {
+      const text = line.trim();
+      if (!text) return;
+      setConnectionState("Connected; receiving firmware output");
+      const log = document.querySelector("#serial-log");
+      if (log.textContent === "Firmware output will appear here.") log.textContent = "";
+      log.textContent = `${log.textContent}${text}\n`.split("\n").slice(-81).join("\n");
+      log.scrollTop = log.scrollHeight;
+      parseSensorLine(text);
+
+      const mapping = text.match(/X_FORWARD_IS_TOWARD_MAX=(true|false)\s+Y_FORWARD_IS_TOWARD_MAX=(true|false)/i);
+      if (mapping) {
+        liveAxes.X.forwardIsTowardMax = mapping[1].toLowerCase() === "true";
+        liveAxes.Y.forwardIsTowardMax = mapping[2].toLowerCase() === "true";
+      }
+      const polarity = text.match(/SENSOR_ACTIVE_LEVEL \(compiled default\)=(HIGH|LOW)/i);
+      if (polarity && activeLevel === null) activeLevel = polarity[1].toUpperCase();
+
+      if (/\[(arm)\] ARMED/i.test(text)) {
+        armedState = "YES";
+      }
+      if (/\[(disarm|stop)\]/i.test(text)) {
+        armedState = "no";
+        for (const axis of Object.values(liveAxes)) {
+          axis.state = "IDLE";
+          axis.segment = null;
+        }
+      }
+      if (/Motors stopped; disarmed/i.test(text)) {
+        armedState = "no";
+        for (const axis of Object.values(liveAxes)) {
+          axis.state = "IDLE";
+          axis.segment = null;
+        }
+      }
+      if (/\[run\].*(autonomous bounce started|both axes started)/i.test(text)) {
+        for (const axis of Object.values(liveAxes)) {
+          axis.state = "RUNNING";
+          axis.fault = "NONE";
+          axis.heading = "TOWARD_MAX";
+          axis.segment = null;
+        }
+      }
+      if (/\[halt\].*autonomous bounce stopped/i.test(text) ||
+          /\[halt\] run halted/i.test(text) ||
+          /\[run\]\s+halted/i.test(text) ||
+          /Run halted; still armed/i.test(text)) {
+        for (const axis of Object.values(liveAxes)) {
+          axis.state = "IDLE";
+          axis.segment = null;
+        }
+      }
+
+      const reversal = text.match(/\[run\]\s+(?:axis\s+)?([XY])\s+reversed(?:\s+->\s+(TOWARD_MAX|TOWARD_MIN))?(?:\s+after\s+(\d+)\s+ms)?(?:.*?reversal\s+(\d+))?/i);
+      if (reversal) {
+        const name = reversal[1].toUpperCase();
+        const axis = liveAxes[name];
+        const nextHeading = reversal[2]?.toUpperCase() ??
+          (axis.heading === "TOWARD_MAX" ? "TOWARD_MIN" : "TOWARD_MAX");
+        const endpoint = nextHeading === "TOWARD_MIN"
+          ? (name === "X" ? TRAVEL_A : TRAVEL_B) : 0;
+        const count = Number(reversal[4] ?? axis.reversals + 1);
+        const elapsed = Number(reversal[3] ?? 0);
+        if (count >= 2 && elapsed > 150) axis.measuredSegmentMs = elapsed - 150;
+        axis.reversals = count;
+        axis.heading = nextHeading;
+        axis.state = "RUNNING";
+        axis.position = endpoint;
+        const nextEndpoint = nextHeading === "TOWARD_MIN" ? 0 :
+          (name === "X" ? TRAVEL_A : TRAVEL_B);
+        beginEstimatedTravel(name, endpoint, nextEndpoint,
+          performance.now() + 150, axis.measuredSegmentMs ?? 0);
+      }
+
+      const status = text.match(/^\s*([XY]): state=(IDLE|RUNNING|FAULT) heading=(TOWARD_MAX|TOWARD_MIN) speed=(\d+) reversals=(\d+) fault=([A-Z_]+)/i);
+      if (status) {
+        const axis = liveAxes[status[1].toUpperCase()];
+        axis.state = status[2].toUpperCase();
+        axis.heading = status[3].toUpperCase();
+        axis.speed = Number(status[4]);
+        axis.reversals = Number(status[5]);
+        axis.fault = status[6].toUpperCase();
+        if (axis.state !== "RUNNING") axis.segment = null;
+      }
+      const fault = text.match(/\[fault\]\s+axis\s+([XY])(?:\s+FAULT)?:\s*([A-Z_]+)/i);
+      if (fault) {
+        const axis = liveAxes[fault[1].toUpperCase()];
+        axis.state = "FAULT";
+        axis.fault = fault[2].toUpperCase();
+        axis.segment = null;
+      }
+      const consoleJog = text.match(/\[([xy][fr])\]\s+driving for (\d+) ms/i);
+      const standaloneJog = text.match(/\[jog\]\s+axis ([XY])\s+(forward|reverse) for (\d+) ms/i);
+      if (consoleJog || standaloneJog) {
+        const label = consoleJog?.[1].toLowerCase();
+        const axisName = consoleJog
+          ? label[0].toUpperCase()
+          : standaloneJog[1].toUpperCase();
+        const axis = axisName ? liveAxes[axisName] : null;
+        if (axis) {
+          const direction = consoleJog
+            ? (label[1] === "f" ? "FORWARD" : "REVERSE")
+            : standaloneJog[2].toUpperCase();
+          const durationMs = Number(consoleJog?.[2] ?? standaloneJog?.[3] ?? 0);
+          axis.state = `JOG ${direction}`;
+          const duty = Number(text.match(/@\s*duty\s+(\d+)/i)?.[1] ?? axis.speed ?? 0);
+          const forward = direction === "FORWARD";
+          const towardMax = axis.forwardIsTowardMax === undefined
+            ? null : forward === axis.forwardIsTowardMax;
+          if (axis.position !== null && towardMax !== null &&
+              axis.measuredSegmentMs && axis.speed && duty) {
+            const travel = axisName === "X" ? TRAVEL_A : TRAVEL_B;
+            const distance = Math.min(travel, travel * durationMs *
+              duty / (axis.measuredSegmentMs * axis.speed));
+            const end = Math.max(0, Math.min(travel,
+              axis.position + (towardMax ? distance : -distance)));
+            beginEstimatedTravel(axisName, axis.position, end,
+              performance.now(), durationMs);
+          }
+        }
+      }
+      if (/\[jog\]\s+(complete|done, stopped|stopped at active(?:\s+\w+)? endpoint)/i.test(text)) {
+        for (const axis of Object.values(liveAxes)) {
+          if (axis.state.startsWith("JOG")) {
+            axis.state = "IDLE";
+            axis.segment = null;
+          }
+        }
+      }
+      const speed = text.match(/\[(?:sx|sy)\]\s+axis\s+([XY])\s+run speed set to\s+(\d+)/i);
+      if (speed) liveAxes[speed[1].toUpperCase()].speed = Number(speed[2]);
+      const standaloneSpeed = text.match(/([XY]) run speed set to\s+(\d+)/i);
+      if (standaloneSpeed) liveAxes[standaloneSpeed[1].toUpperCase()].speed = Number(standaloneSpeed[2]);
+      refreshLiveView();
+    }
+
+    async function sendFirmwareCommand(command) {
+      if (!serialPort?.writable || !liveMode) {
+        throw new Error("Connect to the ESP32 before sending a command.");
+      }
+      const writer = serialPort.writable.getWriter();
+      try {
+        await writer.write(new TextEncoder().encode(`${command}\n`));
+      } finally {
+        writer.releaseLock();
+      }
+    }
+
+    async function readFirmware(port) {
+      const decoder = new TextDecoder();
+      try {
+        while (port.readable && !disconnectRequested) {
+          serialReader = port.readable.getReader();
+          try {
+            while (!disconnectRequested) {
+              const { value, done } = await serialReader.read();
+              if (done) break;
+              serialBuffer += decoder.decode(value, { stream: true });
+              const lines = serialBuffer.split(/\r?\n/);
+              serialBuffer = lines.pop() ?? "";
+              lines.forEach(processFirmwareLine);
+            }
+          } finally {
+            serialReader.releaseLock();
+            serialReader = null;
+          }
+          break;
+        }
+      } catch (error) {
+        if (!disconnectRequested) {
+          setConnectionState(`Serial error: ${error.message}`, true);
+        }
+      } finally {
+        liveMode = false;
+        document.querySelector("#connect").textContent = "Connect ESP32";
+        document.querySelector("#sendCommand").disabled = true;
+        rangeA.disabled = false;
+        rangeB.disabled = false;
+        document.querySelector("#play").disabled = false;
+        document.querySelector("#home").disabled = false;
+        document.querySelector("#mid").disabled = false;
+        let closeError = null;
+        try {
+          if (port.state === "open") await port.close();
+        } catch (error) {
+          closeError = error;
+        }
+        serialPort = null;
+        disconnectRequested = false;
+        refreshLiveView();
+        if (closeError) {
+          setConnectionState(`Could not close serial port: ${closeError.message}`, true);
+        } else if (!connectionError) {
+          setConnectionState("Disconnected");
+        }
+      }
+    }
+
+    async function connectFirmware() {
+      if (liveMode) {
+        disconnectRequested = true;
+        if (serialReader) await serialReader.cancel();
+        return;
+      }
+      if (!("serial" in navigator)) {
+        setConnectionState("Web Serial unavailable; use Chrome or Edge on localhost", true);
+        return;
+      }
+      try {
+        const port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        serialPort = port;
+        liveMode = true;
+        disconnectRequested = false;
+        liveAxes.X.position = null;
+        liveAxes.Y.position = null;
+        for (const axis of Object.values(liveAxes)) {
+          axis.heading = null;
+          axis.state = "UNKNOWN";
+          axis.fault = "NONE";
+          axis.speed = null;
+          axis.reversals = 0;
+          axis.segment = null;
+          axis.measuredSegmentMs = null;
+          axis.forwardIsTowardMax = undefined;
+        }
+        armedState = "unknown";
+        lastMonitorAt = 0;
+        for (const name of Object.keys(sensorState)) sensorState[name] = null;
+        document.querySelector("#connect").textContent = "Disconnect";
+        document.querySelector("#sendCommand").disabled = false;
+        rangeA.disabled = true;
+        rangeB.disabled = true;
+        document.querySelector("#play").disabled = true;
+        document.querySelector("#home").disabled = true;
+        document.querySelector("#mid").disabled = true;
+        setConnectionState("Connected; waiting for firmware output");
+        refreshLiveView();
+        serialReadTask = readFirmware(port);
+        await sendFirmwareCommand("map");
+        await sendFirmwareCommand("st");
+      } catch (error) {
+        disconnectRequested = true;
+        if (serialReader) await serialReader.cancel();
+        if (serialReadTask) await serialReadTask;
+        else if (serialPort?.state === "open") await serialPort.close();
+        liveMode = false;
+        serialPort = null;
+        disconnectRequested = false;
+        setConnectionState(`Connection failed: ${error.message}`, true);
+      }
+    }
+
+    document.querySelector("#connect").addEventListener("click", connectFirmware);
+    document.querySelector("#sendCommand").addEventListener("click", async () => {
+      const input = document.querySelector("#serialCommand");
+      const command = input.value.trim();
+      if (!command) return;
+      if (/^(arm|run|xf|xr|yf|yr)\b/i.test(command) &&
+          !window.confirm(`Send "${command}" to the connected gantry? This may move the hardware.`)) {
+        return;
+      }
+      try {
+        await sendFirmwareCommand(command);
+        input.value = "";
+      } catch (error) {
+        setConnectionState(`Command failed: ${error.message}`, true);
+      }
+    });
+    document.querySelector("#serialCommand").addEventListener("keydown", event => {
+      if (event.key === "Enter") document.querySelector("#sendCommand").click();
+    });
+
+    function resize() {
+      const width = viewport.clientWidth;
+      const height = viewport.clientHeight;
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    rangeA.addEventListener("input", () => {
+      animationOn = false;
+      document.querySelector("#play").textContent = "Animate";
+      placeAssembly(Number(rangeA.value), Number(rangeB.value));
+    });
+    rangeB.addEventListener("input", () => {
+      animationOn = false;
+      document.querySelector("#play").textContent = "Animate";
+      placeAssembly(Number(rangeA.value), Number(rangeB.value));
+    });
+    document.querySelector("#play").addEventListener("click", event => {
+      animationOn = !animationOn;
+      animationStart = performance.now();
+      event.currentTarget.textContent = animationOn ? "Pause" : "Animate";
+    });
+    document.querySelector("#home").addEventListener("click", () => {
+      animationOn = false;
+      document.querySelector("#play").textContent = "Animate";
+      rangeA.value = 0;
+      rangeB.value = 0;
+      placeAssembly(0, 0);
+    });
+    document.querySelector("#mid").addEventListener("click", () => {
+      animationOn = false;
+      document.querySelector("#play").textContent = "Animate";
+      rangeA.value = String(Math.round(TRAVEL_A / 2));
+      rangeB.value = String(Math.round(TRAVEL_B / 2));
+      placeAssembly(Number(rangeA.value), Number(rangeB.value));
+    });
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      if (animationOn) {
+        const seconds = (now - animationStart) / 1000;
+        const a = (TRAVEL_A / 2) * (1 - Math.cos(seconds * 0.45));
+        const b = (TRAVEL_B / 2) * (1 - Math.cos(seconds * 0.36 + 0.8));
+        rangeA.value = String(Math.round(a));
+        rangeB.value = String(Math.round(b));
+        placeAssembly(a, b);
+      }
+      if (liveMode) {
+        for (const axis of Object.values(liveAxes)) {
+          if (axis.segment && axis.position !== null) {
+            const nowMs = performance.now();
+            const axisName = liveAxes.X === axis ? "X" : "Y";
+            const originSensor = axisName === "X"
+              ? (axis.segment.from === 0 ? "X_MIN" : "X_MAX")
+              : (axis.segment.from === 0 ? "Y_MIN" : "Y_MAX");
+            if (sensorState[originSensor] === true) {
+              axis.segment.startAt = nowMs;
+              continue;
+            }
+            const progress = Math.max(0, Math.min(1,
+              (nowMs - axis.segment.startAt) / axis.segment.durationMs));
+            axis.position = axis.segment.from +
+              (axis.segment.to - axis.segment.from) * progress;
+            if (progress === 1) axis.segment = null;
+          }
+        }
+        if (now - lastLiveRenderAt >= 100) {
+          refreshLiveView();
+          lastLiveRenderAt = now;
+        }
+        if (lastMonitorAt && now - lastMonitorAt > 2000) {
+          setConnectionState("Connected; sensor output stale (is `mon` on?)", true);
+        }
+      }
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    placeAssembly(Number(rangeA.value), Number(rangeB.value));
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>

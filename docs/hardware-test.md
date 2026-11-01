@@ -73,10 +73,29 @@ are unconfirmed defaults, not verified against this board.
 which end "FORWARD" drives toward on each axis, and both default to
 `true` - an unconfirmed guess.
 
+The jog commands now refuse to drive into an end whose sensor already
+reads active, trusting that same unconfirmed `X_FORWARD_IS_TOWARD_MAX`/
+`Y_FORWARD_IS_TOWARD_MAX` mapping to decide which sensor is "ahead." If
+the mapping is wrong, the refusal can name the wrong sensor - which is
+exactly why this step starts with the carriage roughly mid-track, not
+at an end, so a refusal here is informative rather than a dead end.
+
+Before jogging, run `mon` and confirm all four sensors read clear (no
+`*` marker) with nothing covering them. If any sensor already reads
+active with nothing covering it, treat the polarity as inverted: run
+`pol`, then re-check `mon` before jogging. A jog refused at mid-track,
+with nothing actually covering the sensor it names, means exactly this
+- fix polarity first, not the FORWARD mapping.
+
 1. With `mon` running, type `xf`. Watch which sensor's `*` marker lights
    up as the X-axis carriage approaches it.
    - If `X_MAX` activates, `X_FORWARD_IS_TOWARD_MAX = true` is correct.
    - If `X_MIN` activates instead, set it to `false` in `config.h`.
+   - If `xf` instead prints a refusal naming a sensor, and that sensor
+     is genuinely covered (the carriage really is resting at that end),
+     jog the other way first to clear it, or add `force` (`xf force`)
+     only once you have checked by eye that the carriage is not really
+     at that end.
 2. Repeat with `yf` for `Y_FORWARD_IS_TOWARD_MAX`.
 3. Try `xr`/`yr` too and confirm the opposite sensor activates, as a
    cross-check.

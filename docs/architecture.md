@@ -288,4 +288,16 @@ should be written only after reading the previous module's report.
   which the discovered values should be committed back into
   `include/config.h`/`docs/wiring.md`, but that act is calibration, not
   firmware development.
+- **The jog safety gate trusts the same unconfirmed FORWARD mapping it
+  is meant to help calibrate.** `cmdJog()`'s refusal (added in Module
+  4, see `src/JogGate.h`) decides which sensor is "ahead" of a jog
+  using `X_FORWARD_IS_TOWARD_MAX`/`Y_FORWARD_IS_TOWARD_MAX` — the exact
+  constants `docs/hardware-test.md` step 5 exists to determine in the
+  first place. If that mapping is wrong, the gate can name the wrong
+  sensor in its refusal message, or (equivalently) refuse/permit the
+  opposite of what a correct mapping would. This is why step 5 starts
+  with the carriage roughly mid-track rather than at an end, and why
+  the gate's refusal message always states which mapping constant it
+  assumed, so the operator can judge for themselves whether to trust
+  it, jog the other way, or use `force`.
 

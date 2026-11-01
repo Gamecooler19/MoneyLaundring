@@ -444,11 +444,14 @@
               serialBuffer = lines.pop() ?? "";
               lines.forEach(processFirmwareLine);
             }
+          } catch (error) {
+            if (disconnectRequested) break;
+            if (!port.readable) throw error;
+            setConnectionState(`Serial read error; retrying: ${error.message}`, true);
           } finally {
             serialReader.releaseLock();
             serialReader = null;
           }
-          break;
         }
       } catch (error) {
         if (!disconnectRequested) {
@@ -483,6 +486,7 @@
     async function connectFirmware() {
       if (liveMode) {
         disconnectRequested = true;
+        connectionError = false;
         if (serialReader) await serialReader.cancel();
         return;
       }
@@ -490,6 +494,7 @@
         setConnectionState("Web Serial unavailable; use Chrome or Edge on localhost", true);
         return;
       }
+      connectionError = false;
       try {
         const port = await navigator.serial.requestPort();
         await port.open({ baudRate: 115200 });
@@ -531,7 +536,9 @@
         liveMode = false;
         serialPort = null;
         disconnectRequested = false;
-        setConnectionState(`Connection failed: ${error.message}`, true);
+        if (!connectionError) {
+          setConnectionState(`Connection failed: ${error.message}`, true);
+        }
       }
     }
 

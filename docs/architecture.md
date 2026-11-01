@@ -294,10 +294,12 @@ should be written only after reading the previous module's report.
   using `X_FORWARD_IS_TOWARD_MAX`/`Y_FORWARD_IS_TOWARD_MAX` — the exact
   constants `docs/hardware-test.md` step 5 exists to determine in the
   first place. If that mapping is wrong, the gate can name the wrong
-  sensor in its refusal message, or (equivalently) refuse/permit the
-  opposite of what a correct mapping would. This is why step 5 starts
-  with the carriage roughly mid-track rather than at an end, and why
-  the gate's refusal message always states which mapping constant it
-  assumed, so the operator can judge for themselves whether to trust
-  it, jog the other way, or use `force`.
-
+  destination sensor in its refusal message, or refuse/permit the
+  opposite direction from the one a correct mapping would indicate. A
+  jog toward an active destination is refused; if both endpoint sensors
+  are active, both jog directions are refused. Operators should use
+  `pol` only when the sensor's active indication is inverted. Otherwise,
+  clear the active endpoint with motor power off or correct the sensor
+  wiring, placement, or configured pin before retrying. The hardware
+  checklist starts the direction test with the carriage roughly mid-track
+  to avoid relying on an unverified endpoint mapping.

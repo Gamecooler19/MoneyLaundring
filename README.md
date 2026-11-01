@@ -133,8 +133,8 @@ filename alone, if in doubt.
 | `disarm`      | disable motor output (also ends any run) |
 | `stop`        | stop both motors immediately and disarm (also ends any run) |
 | `speed <n>`   | set jog duty 0-255, clamped to `MAX_DUTY` (not while running) |
-| `xf` / `xr`   | jog axis X forward/reverse for `JOG_MS` (armed, not while running) - use with `mon` to see which sensor it approaches. Refuses if the sensor ahead of that direction is already active; add `force` (e.g. `xf force`) to jog anyway once you have checked by eye that the carriage is not at that end |
-| `yf` / `yr`   | jog axis Y forward/reverse for `JOG_MS` (armed, not while running), with the same engaged-sensor refusal and `force` override as `xf`/`xr` |
+| `xf` / `xr`   | jog axis X forward/reverse for `JOG_MS` (armed, not while running) - use with `mon` to see which sensor it approaches |
+| `yf` / `yr`   | jog axis Y forward/reverse for `JOG_MS` (armed, not while running) |
 | `run`         | start autonomous bounce on both axes (armed, idle only) |
 | `halt`        | stop autonomous bounce, stay armed |
 | `sx <0-255>`  | set axis X run speed, clamped to `MAX_DUTY` (allowed while running) |
@@ -154,6 +154,11 @@ first segment after `run` starts mid-track and is short, so only read
 `st`'s longest values after at least four reversals per axis. See
 [`docs/hardware-test.md`](docs/hardware-test.md) steps 7 and 9 for the
 full procedure.
+
+Jog commands are refused when the endpoint in the requested direction is
+already active, and an in-progress jog stops when that endpoint activates.
+Serial command lines are limited to 80 characters; longer lines are discarded
+through their newline and are not executed.
 
 ## Fault codes
 

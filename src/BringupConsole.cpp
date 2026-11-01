@@ -2,8 +2,8 @@
 
 #include <esp_system.h>
 
-#include "JogGate.h"
 #include "config.h"
+#include "JogGate.h"
 
 namespace {
 
@@ -93,8 +93,7 @@ void BringupConsole::begin(Motor &motorX, Motor &motorY, LimitSensor &xMin,
 
   _autoRunPending = true;
   _autoRunStartMs = millis();
-  Serial.print("[boot] AUTO_RUN_ON_BOOT: hardware reset detected (EN pin, "
-                "USB serial reset, or power-on). "
+  Serial.print("[boot] AUTO_RUN_ON_BOOT: qualifying hardware reset detected. "
                 "Auto-arm+run in ");
   Serial.print(AUTO_RUN_DELAY_MS);
   Serial.println(" ms. Send any character now to cancel.");
@@ -391,7 +390,7 @@ Motor *BringupConsole::motorFor(JogAxis axis) {
 }
 
 void BringupConsole::cmdJog(JogAxis axis, Direction dir, const char *label,
-                             unsigned long nowMs, const String &arg) {
+                             unsigned long nowMs) {
   if (_gantry->isRunning()) {
     Serial.print("[");
     Serial.print(label);
@@ -416,56 +415,29 @@ void BringupConsole::cmdJog(JogAxis axis, Direction dir, const char *label,
     return;
   }
 
-  // Jog safety gate: refuse (unless explicitly forced) if the sensor
-  // ahead of this jog's direction is already active. Uses only the
-  // axis's existing X/Y FORWARD mapping constant and the two debounced
-  // active() states for this axis - no new config.h value, no change
-  // to Axis/Motor/LimitSensor/GantryController, and no effect on any
-  // other guard above: `force` bypasses only this one check.
-  const bool jogIsForward = (dir == Direction::FORWARD);
   const bool forwardIsTowardMax =
-      (axis == JogAxis::X) ? X_FORWARD_IS_TOWARD_MAX : Y_FORWARD_IS_TOWARD_MAX;
-  const bool aheadIsMax = JogGate::aheadIsMax(jogIsForward, forwardIsTowardMax);
-  LimitSensor *minSensor = (axis == JogAxis::X) ? _xMin : _yMin;
-  LimitSensor *maxSensor = (axis == JogAxis::X) ? _xMax : _yMax;
-  const bool minActive = minSensor->active();
-  const bool maxActive = maxSensor->active();
-  const bool mustRefuseJog = JogGate::mustRefuse(aheadIsMax, minActive, maxActive);
-  const bool forced = arg.equalsIgnoreCase("force");
-
-  if (mustRefuseJog) {
-    const char *sensorName;
-    uint8_t sensorPin;
-    if (axis == JogAxis::X) {
-      sensorName = aheadIsMax ? "X_MAX" : "X_MIN";
-      sensorPin = aheadIsMax ? X_MAX : X_MIN;
-    } else {
-      sensorName = aheadIsMax ? "Y_MAX" : "Y_MIN";
-      sensorPin = aheadIsMax ? Y_MAX : Y_MIN;
-    }
-
-    if (!forced) {
-      Serial.print("[");
-      Serial.print(label);
-      Serial.print("] refused: ");
-      Serial.print(sensorName);
-      Serial.print(" (GPIO ");
-      Serial.print(sensorPin);
-      Serial.print(") is already active (level=");
-      Serial.print(_activeLevel == HIGH ? "HIGH" : "LOW");
-      Serial.print(", assuming ");
-      Serial.print(axis == JogAxis::X ? "X_FORWARD_IS_TOWARD_MAX=" : "Y_FORWARD_IS_TOWARD_MAX=");
-      Serial.print(forwardIsTowardMax ? "true" : "false");
-      Serial.println("). Jog the other way, or add `force` only if you have "
-                      "checked by eye that the carriage is not at that end.");
-      return;
-    }
-
+      axis == JogAxis::X ? X_FORWARD_IS_TOWARD_MAX : Y_FORWARD_IS_TOWARD_MAX;
+  const JogGate::Destination jogDestination = JogGate::destination(
+      dir == Direction::FORWARD, forwardIsTowardMax,
+      axis == JogAxis::X ? _xMin->active() : _yMin->active(),
+      axis == JogAxis::X ? _xMax->active() : _yMax->active());
+  LimitSensor *destination = nullptr;
+  if (axis == JogAxis::X) {
+    destination = jogDestination.isMax ? _xMax : _xMin;
+  } else {
+    destination = jogDestination.isMax ? _yMax : _yMin;
+  }
+  if (destination == nullptr) {
+    Serial.println("[jog] refused: destination sensor is not configured.");
+    return;
+  }
+  if (jogDestination.active) {
     Serial.print("[");
     Serial.print(label);
-    Serial.print("] FORCED: driving toward ");
-    Serial.print(sensorName);
-    Serial.println(" despite it already reading active.");
+    Serial.print("] refused: ");
+    Serial.print(jogDestination.isMax ? "MAX" : "MIN");
+    Serial.println(" endpoint is already active.");
+    return;
   }
 
   Serial.print("[");
@@ -585,13 +557,13 @@ void BringupConsole::handleLine(String line, unsigned long nowMs) {
   } else if (cmd == "speed") {
     cmdSpeed(arg);
   } else if (cmd == "xf") {
-    cmdJog(JogAxis::X, Direction::FORWARD, "xf", nowMs, arg);
+    cmdJog(JogAxis::X, Direction::FORWARD, "xf", nowMs);
   } else if (cmd == "xr") {
-    cmdJog(JogAxis::X, Direction::REVERSE, "xr", nowMs, arg);
+    cmdJog(JogAxis::X, Direction::REVERSE, "xr", nowMs);
   } else if (cmd == "yf") {
-    cmdJog(JogAxis::Y, Direction::FORWARD, "yf", nowMs, arg);
+    cmdJog(JogAxis::Y, Direction::FORWARD, "yf", nowMs);
   } else if (cmd == "yr") {
-    cmdJog(JogAxis::Y, Direction::REVERSE, "yr", nowMs, arg);
+    cmdJog(JogAxis::Y, Direction::REVERSE, "yr", nowMs);
   } else if (cmd == "run") {
     cmdRun(nowMs);
   } else if (cmd == "halt") {
@@ -626,6 +598,30 @@ void BringupConsole::updateJog(unsigned long nowMs) {
   if (_jogAxis == JogAxis::NONE) {
     return;
   }
+
+  const bool forwardIsTowardMax =
+      _jogAxis == JogAxis::X ? X_FORWARD_IS_TOWARD_MAX : Y_FORWARD_IS_TOWARD_MAX;
+  const JogGate::Destination jogDestination = JogGate::destination(
+      _jogDir == Direction::FORWARD, forwardIsTowardMax,
+      _jogAxis == JogAxis::X ? _xMin->active() : _yMin->active(),
+      _jogAxis == JogAxis::X ? _xMax->active() : _yMax->active());
+  LimitSensor *destination = nullptr;
+  if (_jogAxis == JogAxis::X) {
+    destination = jogDestination.isMax ? _xMax : _xMin;
+  } else {
+    destination = jogDestination.isMax ? _yMax : _yMin;
+  }
+  if (destination != nullptr && jogDestination.active) {
+    Motor *m = motorFor(_jogAxis);
+    if (m != nullptr) {
+      m->stop();
+    }
+    _gantry->invalidateCommandCache();
+    _jogAxis = JogAxis::NONE;
+    Serial.println("[jog] stopped at active endpoint");
+    return;
+  }
+
   if (nowMs - _jogStartMs >= JOG_MS) {
     Motor *m = motorFor(_jogAxis);
     if (m != nullptr) {
@@ -752,21 +748,20 @@ void BringupConsole::update(unsigned long nowMs) {
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n') {
-      if (_lineOverflowed) {
-        // The whole overlong line, through this terminating newline,
-        // is discarded: nothing from it (including whatever arrived
-        // right before this '\n') is ever dispatched to handleLine().
-        Serial.println("[?] line too long, discarded");
-        _lineOverflowed = false;
+      if (_discardingInputLine) {
+        _inputBuffer = "";
+        _discardingInputLine = false;
       } else {
         handleLine(_inputBuffer, nowMs);
+        _inputBuffer = "";
       }
-      _inputBuffer = "";
-    } else if (c != '\r') {
-      if (_inputBuffer.length() >= MAX_LINE_LEN) {
-        _lineOverflowed = true;
-      } else {
+    } else if (c != '\r' && !_discardingInputLine) {
+      if (_inputBuffer.length() < 80) {
         _inputBuffer += c;
+      } else {
+        _inputBuffer = "";
+        _discardingInputLine = true;
+        Serial.println("[serial] input too long; discarding through newline.");
       }
     }
   }

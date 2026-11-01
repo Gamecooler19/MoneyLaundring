@@ -67,6 +67,7 @@ class BringupConsole {
   JogAxis _jogAxis = JogAxis::NONE;
   Direction _jogDir = Direction::FORWARD;
   unsigned long _jogStartMs = 0;
+  bool _discardingInputLine = false;
 
   static constexpr size_t SCAN_MAX_PINS = 20;
   ScanPhase _scanPhase = ScanPhase::IDLE;
@@ -75,16 +76,7 @@ class BringupConsole {
   int _scanLastLevel[SCAN_MAX_PINS] = {0};
   size_t _scanPinCount = 0;
 
-  // Longest line handleLine() will ever see. Any character received
-  // past this limit, for the rest of the current line (through and
-  // including its terminating '\n'), is discarded instead of being
-  // appended to _inputBuffer, so an overlong line can never leave a
-  // partial tail behind to be misread as a fresh command once the
-  // newline finally arrives. No real command is anywhere near this
-  // length.
-  static constexpr size_t MAX_LINE_LEN = 128;
   String _inputBuffer;
-  bool _lineOverflowed = false;  // true while the current line exceeds MAX_LINE_LEN
 
   void handleLine(String line, unsigned long nowMs);
 
@@ -97,8 +89,7 @@ class BringupConsole {
   void cmdDisarm(const char *reason);
   void cmdStop();
   void cmdSpeed(const String &arg);
-  void cmdJog(JogAxis axis, Direction dir, const char *label,
-              unsigned long nowMs, const String &arg);
+  void cmdJog(JogAxis axis, Direction dir, const char *label, unsigned long nowMs);
   void cmdRun(unsigned long nowMs);
   void cmdHalt();
   void cmdSetSpeedX(const String &arg);

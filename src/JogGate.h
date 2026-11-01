@@ -15,6 +15,11 @@
 
 namespace JogGate {
 
+struct Destination {
+  bool isMax;
+  bool active;
+};
+
 // Given whether the jogged direction equals the motor's FORWARD
 // direction, and whether FORWARD is mapped toward the MAX-end sensor
 // for this axis, returns true if the sensor ahead of this jog is the
@@ -35,6 +40,12 @@ inline bool aheadIsMax(bool jogIsForward, bool forwardIsTowardMax) {
 // refuses — only the ahead sensor's own state matters here.
 inline bool mustRefuse(bool aheadIsMaxResult, bool minActive, bool maxActive) {
   return aheadIsMaxResult ? maxActive : minActive;
+}
+
+inline Destination destination(bool jogIsForward, bool forwardIsTowardMax,
+                               bool minActive, bool maxActive) {
+  const bool isMax = aheadIsMax(jogIsForward, forwardIsTowardMax);
+  return {isMax, mustRefuse(isMax, minActive, maxActive)};
 }
 
 }  // namespace JogGate

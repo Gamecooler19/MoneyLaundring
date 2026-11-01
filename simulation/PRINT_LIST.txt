@@ -1,0 +1,5 @@
+ALT 1 - COMPLETE 3D PRINT (screws only: no glue, no laser)
+rack x2 (teeth up) | guide x1 | junction x1 | pinion x2 | tool_holder x1 (the dart-board box; board face goes down on the bed)
+PLA basic colour, 0.2 mm Standard, infill 10%.  ~90 g total.
+Hardware: 2x M3x25 + nuts (junction to rack A end), 2x M3x20 + nuts (box to rack B end), 4x M4 screws (base),
+          4 zip ties (motors), 2 BO motors, M3 set screw in each pinion.

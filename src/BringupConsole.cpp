@@ -3,6 +3,7 @@
 #include <esp_system.h>
 
 #include "config.h"
+#include "JogGate.h"
 
 namespace {
 
@@ -92,7 +93,7 @@ void BringupConsole::begin(Motor &motorX, Motor &motorY, LimitSensor &xMin,
 
   _autoRunPending = true;
   _autoRunStartMs = millis();
-  Serial.print("[boot] AUTO_RUN_ON_BOOT: power-on reset detected. "
+  Serial.print("[boot] AUTO_RUN_ON_BOOT: qualifying hardware reset detected. "
                 "Auto-arm+run in ");
   Serial.print(AUTO_RUN_DELAY_MS);
   Serial.println(" ms. Send any character now to cancel.");
@@ -414,25 +415,27 @@ void BringupConsole::cmdJog(JogAxis axis, Direction dir, const char *label,
     return;
   }
 
-  const bool towardMax =
-      axis == JogAxis::X
-          ? ((dir == Direction::FORWARD) == X_FORWARD_IS_TOWARD_MAX)
-          : ((dir == Direction::FORWARD) == Y_FORWARD_IS_TOWARD_MAX);
+  const bool forwardIsTowardMax =
+      axis == JogAxis::X ? X_FORWARD_IS_TOWARD_MAX : Y_FORWARD_IS_TOWARD_MAX;
+  const JogGate::Destination jogDestination = JogGate::destination(
+      dir == Direction::FORWARD, forwardIsTowardMax,
+      axis == JogAxis::X ? _xMin->active() : _yMin->active(),
+      axis == JogAxis::X ? _xMax->active() : _yMax->active());
   LimitSensor *destination = nullptr;
   if (axis == JogAxis::X) {
-    destination = towardMax ? _xMax : _xMin;
+    destination = jogDestination.isMax ? _xMax : _xMin;
   } else {
-    destination = towardMax ? _yMax : _yMin;
+    destination = jogDestination.isMax ? _yMax : _yMin;
   }
   if (destination == nullptr) {
     Serial.println("[jog] refused: destination sensor is not configured.");
     return;
   }
-  if (destination->active()) {
+  if (jogDestination.active) {
     Serial.print("[");
     Serial.print(label);
     Serial.print("] refused: ");
-    Serial.print(towardMax ? "MAX" : "MIN");
+    Serial.print(jogDestination.isMax ? "MAX" : "MIN");
     Serial.println(" endpoint is already active.");
     return;
   }
@@ -596,17 +599,19 @@ void BringupConsole::updateJog(unsigned long nowMs) {
     return;
   }
 
-  const bool towardMax =
-      _jogAxis == JogAxis::X
-          ? ((_jogDir == Direction::FORWARD) == X_FORWARD_IS_TOWARD_MAX)
-          : ((_jogDir == Direction::FORWARD) == Y_FORWARD_IS_TOWARD_MAX);
+  const bool forwardIsTowardMax =
+      _jogAxis == JogAxis::X ? X_FORWARD_IS_TOWARD_MAX : Y_FORWARD_IS_TOWARD_MAX;
+  const JogGate::Destination jogDestination = JogGate::destination(
+      _jogDir == Direction::FORWARD, forwardIsTowardMax,
+      _jogAxis == JogAxis::X ? _xMin->active() : _yMin->active(),
+      _jogAxis == JogAxis::X ? _xMax->active() : _yMax->active());
   LimitSensor *destination = nullptr;
   if (_jogAxis == JogAxis::X) {
-    destination = towardMax ? _xMax : _xMin;
+    destination = jogDestination.isMax ? _xMax : _xMin;
   } else {
-    destination = towardMax ? _yMax : _yMin;
+    destination = jogDestination.isMax ? _yMax : _yMin;
   }
-  if (destination != nullptr && destination->active()) {
+  if (destination != nullptr && jogDestination.active) {
     Motor *m = motorFor(_jogAxis);
     if (m != nullptr) {
       m->stop();

@@ -92,10 +92,11 @@ with nothing actually covering the sensor it names, means exactly this
    - If `X_MAX` activates, `X_FORWARD_IS_TOWARD_MAX = true` is correct.
    - If `X_MIN` activates instead, set it to `false` in `config.h`.
    - If `xf` instead prints a refusal naming a sensor, and that sensor
-     is genuinely covered (the carriage really is resting at that end),
-     jog the other way first to clear it, or add `force` (`xf force`)
-     only once you have checked by eye that the carriage is not really
-     at that end.
+     is genuinely covered because the carriage is resting at that end,
+     do not override the refusal. Turn off motor power and move the carriage
+     clear of the endpoint by hand, then retry the short jog. If the named
+     sensor is not physically covered, verify sensor polarity and the
+     FORWARD mapping before trying again.
 2. Repeat with `yf` for `Y_FORWARD_IS_TOWARD_MAX`.
 3. Try `xr`/`yr` too and confirm the opposite sensor activates, as a
    cross-check.

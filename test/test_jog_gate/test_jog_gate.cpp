@@ -120,6 +120,34 @@ void test_refuse_combo4_behind_only_engaged(void) {
   TEST_ASSERT_FALSE(JogGate::mustRefuse(ahead, /*minActive=*/true, /*maxActive=*/false));
 }
 
+void test_destination_combo1_ahead_active(void) {
+  JogGate::Destination result =
+      JogGate::destination(true, true, /*minActive=*/false, /*maxActive=*/true);
+  TEST_ASSERT_TRUE(result.isMax);
+  TEST_ASSERT_TRUE(result.active);
+}
+
+void test_destination_combo2_behind_active(void) {
+  JogGate::Destination result =
+      JogGate::destination(true, false, /*minActive=*/false, /*maxActive=*/true);
+  TEST_ASSERT_FALSE(result.isMax);
+  TEST_ASSERT_FALSE(result.active);
+}
+
+void test_destination_combo3_behind_active(void) {
+  JogGate::Destination result =
+      JogGate::destination(false, true, /*minActive=*/false, /*maxActive=*/true);
+  TEST_ASSERT_FALSE(result.isMax);
+  TEST_ASSERT_FALSE(result.active);
+}
+
+void test_destination_combo4_ahead_active(void) {
+  JogGate::Destination result =
+      JogGate::destination(false, false, /*minActive=*/false, /*maxActive=*/true);
+  TEST_ASSERT_TRUE(result.isMax);
+  TEST_ASSERT_TRUE(result.active);
+}
+
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -141,5 +169,9 @@ int main(int argc, char **argv) {
   RUN_TEST(test_refuse_combo4_ahead_max_engaged);
   RUN_TEST(test_refuse_combo4_both_clear);
   RUN_TEST(test_refuse_combo4_behind_only_engaged);
+  RUN_TEST(test_destination_combo1_ahead_active);
+  RUN_TEST(test_destination_combo2_behind_active);
+  RUN_TEST(test_destination_combo3_behind_active);
+  RUN_TEST(test_destination_combo4_ahead_active);
   return UNITY_END();
 }

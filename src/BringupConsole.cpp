@@ -2,6 +2,7 @@
 
 #include <esp_system.h>
 
+#include "JogGate.h"
 #include "config.h"
 
 namespace {
@@ -389,7 +390,7 @@ Motor *BringupConsole::motorFor(JogAxis axis) {
 }
 
 void BringupConsole::cmdJog(JogAxis axis, Direction dir, const char *label,
-                             unsigned long nowMs) {
+                             unsigned long nowMs, const String &arg) {
   if (_gantry->isRunning()) {
     Serial.print("[");
     Serial.print(label);
@@ -412,6 +413,58 @@ void BringupConsole::cmdJog(JogAxis axis, Direction dir, const char *label,
   Motor *m = motorFor(axis);
   if (m == nullptr) {
     return;
+  }
+
+  // Jog safety gate: refuse (unless explicitly forced) if the sensor
+  // ahead of this jog's direction is already active. Uses only the
+  // axis's existing X/Y FORWARD mapping constant and the two debounced
+  // active() states for this axis - no new config.h value, no change
+  // to Axis/Motor/LimitSensor/GantryController, and no effect on any
+  // other guard above: `force` bypasses only this one check.
+  const bool jogIsForward = (dir == Direction::FORWARD);
+  const bool forwardIsTowardMax =
+      (axis == JogAxis::X) ? X_FORWARD_IS_TOWARD_MAX : Y_FORWARD_IS_TOWARD_MAX;
+  const bool aheadIsMax = JogGate::aheadIsMax(jogIsForward, forwardIsTowardMax);
+  LimitSensor *minSensor = (axis == JogAxis::X) ? _xMin : _yMin;
+  LimitSensor *maxSensor = (axis == JogAxis::X) ? _xMax : _yMax;
+  const bool minActive = minSensor->active();
+  const bool maxActive = maxSensor->active();
+  const bool mustRefuseJog = JogGate::mustRefuse(aheadIsMax, minActive, maxActive);
+  const bool forced = arg.equalsIgnoreCase("force");
+
+  if (mustRefuseJog) {
+    const char *sensorName;
+    uint8_t sensorPin;
+    if (axis == JogAxis::X) {
+      sensorName = aheadIsMax ? "X_MAX" : "X_MIN";
+      sensorPin = aheadIsMax ? X_MAX : X_MIN;
+    } else {
+      sensorName = aheadIsMax ? "Y_MAX" : "Y_MIN";
+      sensorPin = aheadIsMax ? Y_MAX : Y_MIN;
+    }
+
+    if (!forced) {
+      Serial.print("[");
+      Serial.print(label);
+      Serial.print("] refused: ");
+      Serial.print(sensorName);
+      Serial.print(" (GPIO ");
+      Serial.print(sensorPin);
+      Serial.print(") is already active (level=");
+      Serial.print(_activeLevel == HIGH ? "HIGH" : "LOW");
+      Serial.print(", assuming ");
+      Serial.print(axis == JogAxis::X ? "X_FORWARD_IS_TOWARD_MAX=" : "Y_FORWARD_IS_TOWARD_MAX=");
+      Serial.print(forwardIsTowardMax ? "true" : "false");
+      Serial.println("). Jog the other way, or add `force` only if you have "
+                      "checked by eye that the carriage is not at that end.");
+      return;
+    }
+
+    Serial.print("[");
+    Serial.print(label);
+    Serial.print("] FORCED: driving toward ");
+    Serial.print(sensorName);
+    Serial.println(" despite it already reading active.");
   }
 
   Serial.print("[");
@@ -531,13 +584,13 @@ void BringupConsole::handleLine(String line, unsigned long nowMs) {
   } else if (cmd == "speed") {
     cmdSpeed(arg);
   } else if (cmd == "xf") {
-    cmdJog(JogAxis::X, Direction::FORWARD, "xf", nowMs);
+    cmdJog(JogAxis::X, Direction::FORWARD, "xf", nowMs, arg);
   } else if (cmd == "xr") {
-    cmdJog(JogAxis::X, Direction::REVERSE, "xr", nowMs);
+    cmdJog(JogAxis::X, Direction::REVERSE, "xr", nowMs, arg);
   } else if (cmd == "yf") {
-    cmdJog(JogAxis::Y, Direction::FORWARD, "yf", nowMs);
+    cmdJog(JogAxis::Y, Direction::FORWARD, "yf", nowMs, arg);
   } else if (cmd == "yr") {
-    cmdJog(JogAxis::Y, Direction::REVERSE, "yr", nowMs);
+    cmdJog(JogAxis::Y, Direction::REVERSE, "yr", nowMs, arg);
   } else if (cmd == "run") {
     cmdRun(nowMs);
   } else if (cmd == "halt") {

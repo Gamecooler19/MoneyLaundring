@@ -97,7 +97,8 @@ class BringupConsole {
   void cmdDisarm(const char *reason);
   void cmdStop();
   void cmdSpeed(const String &arg);
-  void cmdJog(JogAxis axis, Direction dir, const char *label, unsigned long nowMs);
+  void cmdJog(JogAxis axis, Direction dir, const char *label,
+              unsigned long nowMs, const String &arg);
   void cmdRun(unsigned long nowMs);
   void cmdHalt();
   void cmdSetSpeedX(const String &arg);

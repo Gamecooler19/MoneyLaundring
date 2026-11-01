@@ -93,7 +93,8 @@ void BringupConsole::begin(Motor &motorX, Motor &motorY, LimitSensor &xMin,
 
   _autoRunPending = true;
   _autoRunStartMs = millis();
-  Serial.print("[boot] AUTO_RUN_ON_BOOT: power-on reset detected. "
+  Serial.print("[boot] AUTO_RUN_ON_BOOT: hardware reset detected (EN pin, "
+                "USB serial reset, or power-on). "
                 "Auto-arm+run in ");
   Serial.print(AUTO_RUN_DELAY_MS);
   Serial.println(" ms. Send any character now to cancel.");

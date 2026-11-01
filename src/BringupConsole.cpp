@@ -698,10 +698,22 @@ void BringupConsole::update(unsigned long nowMs) {
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n') {
-      handleLine(_inputBuffer, nowMs);
+      if (_lineOverflowed) {
+        // The whole overlong line, through this terminating newline,
+        // is discarded: nothing from it (including whatever arrived
+        // right before this '\n') is ever dispatched to handleLine().
+        Serial.println("[?] line too long, discarded");
+        _lineOverflowed = false;
+      } else {
+        handleLine(_inputBuffer, nowMs);
+      }
       _inputBuffer = "";
     } else if (c != '\r') {
-      _inputBuffer += c;
+      if (_inputBuffer.length() >= MAX_LINE_LEN) {
+        _lineOverflowed = true;
+      } else {
+        _inputBuffer += c;
+      }
     }
   }
 

@@ -75,7 +75,16 @@ class BringupConsole {
   int _scanLastLevel[SCAN_MAX_PINS] = {0};
   size_t _scanPinCount = 0;
 
+  // Longest line handleLine() will ever see. Any character received
+  // past this limit, for the rest of the current line (through and
+  // including its terminating '\n'), is discarded instead of being
+  // appended to _inputBuffer, so an overlong line can never leave a
+  // partial tail behind to be misread as a fresh command once the
+  // newline finally arrives. No real command is anywhere near this
+  // length.
+  static constexpr size_t MAX_LINE_LEN = 128;
   String _inputBuffer;
+  bool _lineOverflowed = false;  // true while the current line exceeds MAX_LINE_LEN
 
   void handleLine(String line, unsigned long nowMs);
 
